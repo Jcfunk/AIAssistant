@@ -9,7 +9,7 @@
 
 <p align="center">
   <a href="https://github.com/Jcfunk/AIAssistant/releases/tag/v0.1.0"><img src="https://img.shields.io/github/v/release/Jcfunk/AIAssistant?label=release" alt="Release"></a>
-  <a href="https://github.com/Jcfunk/AIAssistant/releases"><img src="https://img.shields.io/github/downloads/Jcfunk/AI-Assistant/total" alt="Downloads"></a>
+  <a href="https://github.com/Jcfunk/AIAssistant/releases"><img src="https://img.shields.io/github/downloads/Jcfunk/AIAssistant/total" alt="Downloads"></a>
   <a href="https://notepad-plus-plus.org/"><img src="https://img.shields.io/badge/platform-Windows-0078D6" alt="Platform"></a>
   <a href="https://notepad-plus-plus.org/"><img src="https://img.shields.io/badge/Notepad++-Plugin-90E59A" alt="Notepad++"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License"></a>
