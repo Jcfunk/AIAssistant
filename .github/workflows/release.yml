@@ -1,0 +1,33 @@
+name: Build and Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Release x64
+        working-directory: .\
+        run: msbuild AI-Assistant.vcxproj /m /p:Configuration=Release /p:Platform=x64
+
+      - name: Package release zip
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.release.tag_name }}"
+          $version = $tag.TrimStart('v') + ".0"
+          $releaseUrl = "${{ github.event.release.html_url }}"
+          .\scripts\package-npp-ai-plugin.ps1 -Platform x64 -Version $version -ReleaseUrl $releaseUrl
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/AI-Assistant-*.zip
