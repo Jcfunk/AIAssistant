@@ -37,10 +37,13 @@ target_link_libraries(NppAIAssistant PRIVATE
     shell32
     shlwapi
     winhttp
+    -static-libgcc
+    -static-libstdc++
 )
 
 set_target_properties(NppAIAssistant PROPERTIES
     OUTPUT_NAME "NppAIAssistant"
+    PREFIX ""
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins/NppAIAssistant"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins/NppAIAssistant"
 )

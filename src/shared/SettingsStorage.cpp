@@ -16,7 +16,7 @@
 
 #include "SettingsStorage.h"
 
-#include <ShlObj.h>
+#include <shlobj.h>
 #include <vector>
 
 namespace {

@@ -16,8 +16,8 @@
 
 #include "SecureStorage.h"
 
-#include <Aclapi.h>
-#include <ShlObj.h>
+#include <aclapi.h>
+#include <shlobj.h>
 #include <fstream>
 #include <vector>
 #include <wincrypt.h>
@@ -222,7 +222,7 @@ std::wstring SecureStorage::decrypt(const std::vector<BYTE> &data) {
 
 bool SecureStorage::writeToFile(const std::wstring &filePath,
                                 const std::vector<BYTE> &data) {
-  std::ofstream file(filePath, std::ios::binary | std::ios::trunc);
+  std::ofstream file(filePath.c_str(), std::ios::binary | std::ios::trunc);
   if (!file.is_open())
     return false;
 
@@ -235,7 +235,7 @@ bool SecureStorage::writeToFile(const std::wstring &filePath,
 std::vector<BYTE> SecureStorage::readFromFile(const std::wstring &filePath) {
   std::vector<BYTE> data;
 
-  std::ifstream file(filePath, std::ios::binary | std::ios::ate);
+  std::ifstream file(filePath.c_str(), std::ios::binary | std::ios::ate);
   if (!file.is_open())
     return data;
 

@@ -32,9 +32,9 @@ constexpr UINT kAiContextRefactor = 2;
 constexpr UINT kAiContextComments = 3;
 constexpr UINT kAiContextFix = 4;
 
-enum class LLMProvider { OpenAI = 0, Gemini, Claude, Copilot, ProviderCount };
-constexpr std::array<LLMProvider, 3> kEnabledProviders = {
-    LLMProvider::OpenAI, LLMProvider::Gemini, LLMProvider::Claude};
+enum class LLMProvider { OpenAI = 0, Gemini, Claude, Copilot, Local, ProviderCount };
+constexpr std::array<LLMProvider, 4> kEnabledProviders = {
+    LLMProvider::OpenAI, LLMProvider::Gemini, LLMProvider::Claude, LLMProvider::Local};
 
 enum class UiLanguage {
   English,
@@ -143,6 +143,9 @@ struct AIAssistantConfig {
   std::wstring geminiKey;
   std::wstring claudeKey;
   std::wstring copilotKey;
+  std::wstring localBaseUrl;
+  std::wstring localKey;
+  int localTimeoutSeconds = 300;
   std::wstring customPromptInstructions;
   LLMProvider defaultProvider = LLMProvider::OpenAI;
   UiLanguagePreference uiLanguagePreference = UiLanguagePreference::FollowNotepad;
@@ -189,6 +192,7 @@ const wchar_t *kOpenAIKeyName = L"openai_apikey";
 const wchar_t *kGeminiKeyName = L"gemini_apikey";
 const wchar_t *kClaudeKeyName = L"claude_apikey";
 const wchar_t *kCopilotKeyName = L"copilot_apikey";
+const wchar_t *kLocalKeyName = L"local_apikey";
 const wchar_t *kCopilotOauthKeyName = L"copilot_oauth_token";
 const wchar_t *kDefaultProviderName = L"default_provider";
 const wchar_t *kUiLanguagePreferenceName = L"ui_language_preference";
@@ -202,6 +206,8 @@ const wchar_t *kOutputPreserveStyleName = L"prompt_output_preserve_style";
 const wchar_t *kOutputMentionRisksName = L"prompt_output_mention_risks";
 const wchar_t *kCustomPromptInstructionsName = L"prompt_custom_instructions";
 const wchar_t *kRequireCtrlEnterName = L"require_ctrl_enter";
+const wchar_t *kLocalBaseUrlName = L"local_base_url";
+const wchar_t *kLocalTimeoutName = L"local_timeout_seconds";
 
 void cmdTogglePanel();
 void cmdExplainSelection();
@@ -219,6 +225,11 @@ LRESULT CALLBACK ScintillaSubclassProc(HWND hwnd, UINT message, WPARAM wParam,
 LRESULT CALLBACK InputEditSubclassProc(HWND hwnd, UINT message, WPARAM wParam,
                                        LPARAM lParam);
 
+std::wstring trimWhitespace(const std::wstring &value);
+void wipeString(std::wstring &value);
+bool parseStoredBool(const std::wstring &value, bool defaultValue);
+int parseStoredInt(const std::wstring &value, int defaultValue);
+
 std::wstring getProviderName(LLMProvider provider) {
   switch (provider) {
   case LLMProvider::OpenAI:
@@ -229,6 +240,8 @@ std::wstring getProviderName(LLMProvider provider) {
     return L"Claude";
   case LLMProvider::Copilot:
     return L"Copilot";
+  case LLMProvider::Local:
+    return L"Local";
   default:
     return L"AI";
   }
@@ -882,6 +895,15 @@ void capturePromptSettingsFromDialog(HWND hwnd, AIAssistantConfig &config) {
       ::SendMessageW(::GetDlgItem(hwnd, IDC_OUTPUT_RISKS_CHECK), BM_GETCHECK, 0,
                      0) == BST_CHECKED;
   config.customPromptInstructions.clear();
+
+  wchar_t text[512]{};
+  ::GetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_URL_EDIT), text, 512);
+  config.localBaseUrl = trimWhitespace(text);
+  ::GetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_KEY_EDIT), text, 512);
+  config.localKey = trimWhitespace(text);
+  ::GetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_TIMEOUT_EDIT), text, 512);
+  config.localTimeoutSeconds = parseStoredInt(text, 300);
+  SecureZeroMemory(text, sizeof(text));
 }
 
 std::wstring trimWhitespace(const std::wstring &value) {
@@ -1046,6 +1068,8 @@ std::wstring getProviderApiKey(LLMProvider provider) {
     return trimWhitespace(g_config.geminiKey);
   case LLMProvider::Claude:
     return trimWhitespace(g_config.claudeKey);
+  case LLMProvider::Local:
+    return trimWhitespace(g_config.localKey);
   default:
     return L"";
   }
@@ -1115,6 +1139,9 @@ void loadPreferencesFromSettings(AIAssistantConfig &config) {
       config.outputMentionRisks);
   config.customPromptInstructions =
       SettingsStorage::loadString(kCustomPromptInstructionsName);
+  config.localBaseUrl = SettingsStorage::loadString(kLocalBaseUrlName);
+  config.localTimeoutSeconds = parseStoredInt(
+      SettingsStorage::loadString(kLocalTimeoutName), config.localTimeoutSeconds);
 
   config.responseLanguage = sanitizePromptResponseLanguage(parseStoredInt(
       SettingsStorage::loadString(kResponseLanguageName),
@@ -1207,6 +1234,8 @@ void savePreferencesToSettings(const AIAssistantConfig &config) {
                               config.customPromptInstructions);
   SettingsStorage::saveString(kRequireCtrlEnterName,
                               config.requireCtrlEnterToSend ? L"1" : L"0");
+  SettingsStorage::saveString(kLocalBaseUrlName, config.localBaseUrl);
+  SettingsStorage::saveString(kLocalTimeoutName, std::to_wstring(config.localTimeoutSeconds));
 }
 
 void addMessage(bool isUser, const std::wstring &content) {
@@ -1255,6 +1284,7 @@ void loadConfig() {
   g_config.geminiKey = SecureStorage::loadApiKey(kGeminiKeyName);
   g_config.claudeKey = SecureStorage::loadApiKey(kClaudeKeyName);
   g_config.copilotKey = SecureStorage::loadApiKey(kCopilotKeyName);
+  g_config.localKey = SecureStorage::loadApiKey(kLocalKeyName);
   if (SettingsStorage::loadSchemaVersion() >= kSettingsSchemaVersion) {
     loadPreferencesFromSettings(g_config);
   } else {
@@ -1281,6 +1311,7 @@ void saveConfig(const AIAssistantConfig &config) {
   SecureStorage::saveApiKey(kGeminiKeyName, config.geminiKey);
   SecureStorage::saveApiKey(kClaudeKeyName, config.claudeKey);
   SecureStorage::saveApiKey(kCopilotKeyName, config.copilotKey);
+  SecureStorage::saveApiKey(kLocalKeyName, config.localKey);
   savePreferencesToSettings(config);
   cleanupSecurePreferenceBlobs();
   g_config = config;
@@ -1729,7 +1760,7 @@ void updateModelCombo() {
   }
 
   std::wstring apiKey = getProviderApiKey(g_currentProvider);
-  if (apiKey.empty()) {
+  if (apiKey.empty() && g_currentProvider != LLMProvider::Local) {
     populateModelComboPlaceholder(modelCombo, g_uiLanguage == UiLanguage::Chinese ? L"\u8ACB\u5148\u5728\u8A2D\u5B9A\u4E2D\u8A2D\u5B9A API Key" : L"Configure API key in Settings");
     return;
   }
@@ -1744,6 +1775,9 @@ void updateModelCombo() {
     break;
   case LLMProvider::Claude:
     response = LLMApiClient::listClaudeModels(apiKey);
+    break;
+  case LLMProvider::Local:
+    response = LLMApiClient::listLocalModels(g_config.localBaseUrl, apiKey);
     break;
   default:
     populateModelComboPlaceholder(modelCombo, g_uiLanguage == UiLanguage::Chinese ? L"\u4F9B\u61C9\u5546\u7121\u6CD5\u4F7F\u7528" : L"Provider unavailable");
@@ -1991,6 +2025,8 @@ LLMResponse callCurrentProvider(const std::wstring &apiKey,
     return LLMApiClient::callGemini(apiKey, prompt, g_currentModel);
   case LLMProvider::Claude:
     return LLMApiClient::callClaude(apiKey, prompt, g_currentModel);
+  case LLMProvider::Local:
+    return LLMApiClient::callLocalLLM(g_config.localBaseUrl, apiKey, prompt, g_currentModel, g_config.localTimeoutSeconds);
   default: {
     LLMResponse unsupported;
     unsupported.errorMessage = L"Unsupported provider";
@@ -2006,8 +2042,13 @@ std::wstring invokeProvider(const std::wstring &prompt) {
 
   std::wstring apiKey = getProviderApiKey(g_currentProvider);
 
-  if (apiKey.empty()) {
+  if (g_currentProvider != LLMProvider::Local && apiKey.empty()) {
     return L"[Error] API key not configured for " + getProviderName(g_currentProvider) +
+           L". Open Settings to configure it.";
+  }
+
+  if (g_currentProvider == LLMProvider::Local && g_config.localBaseUrl.empty()) {
+    return L"[Error] Local server URL not configured for " + getProviderName(g_currentProvider) +
            L". Open Settings to configure it.";
   }
 
@@ -2079,6 +2120,12 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT message, WPARAM wParam,
                      incoming->geminiKey.c_str());
     ::SetWindowTextW(::GetDlgItem(hwnd, IDC_CLAUDE_KEY_EDIT),
                      incoming->claudeKey.c_str());
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_URL_EDIT),
+                     incoming->localBaseUrl.c_str());
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_KEY_EDIT),
+                     incoming->localKey.c_str());
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_TIMEOUT_EDIT),
+                     std::to_wstring(incoming->localTimeoutSeconds).c_str());
 
     HWND providerCombo = ::GetDlgItem(hwnd, IDC_DEFAULT_PROVIDER_COMBO);
     ::SendMessageW(providerCombo, CB_RESETCONTENT, 0, 0);
@@ -2101,6 +2148,8 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT message, WPARAM wParam,
     ::SendMessageW(::GetDlgItem(hwnd, IDC_GEMINI_KEY_EDIT), EM_SETPASSWORDCHAR,
                    maskChar, 0);
     ::SendMessageW(::GetDlgItem(hwnd, IDC_CLAUDE_KEY_EDIT), EM_SETPASSWORDCHAR,
+                   maskChar, 0);
+    ::SendMessageW(::GetDlgItem(hwnd, IDC_LOCAL_KEY_EDIT), EM_SETPASSWORDCHAR,
                    maskChar, 0);
     ::SendMessageW(::GetDlgItem(hwnd, IDC_SEND_SHORTCUT_CHECK), BM_SETCHECK,
                    incoming->requireCtrlEnterToSend ? BST_CHECKED : BST_UNCHECKED,
@@ -2183,15 +2232,29 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT message, WPARAM wParam,
         apiKey = config->claudeKey;
         providerName = L"Claude";
         break;
+      case LLMProvider::Local:
+        apiKey = config->localKey;
+        providerName = L"Local";
+        break;
       default:
         return TRUE;
       }
 
-      if (apiKey.empty()) {
+      if (provider != LLMProvider::Local && apiKey.empty()) {
         const std::wstring warningText =
             g_uiLanguage == UiLanguage::Chinese
                 ? L"\u5C1A\u672A\u8A2D\u5B9A " + providerName + L" API Key\u3002"
                 : L"No API key configured for " + providerName + L".";
+        ::MessageBoxW(hwnd, warningText.c_str(), tr(TextId::SettingsTitle),
+                      MB_OK | MB_ICONWARNING);
+        return TRUE;
+      }
+
+      if (provider == LLMProvider::Local && config->localBaseUrl.empty()) {
+        const std::wstring warningText =
+            g_uiLanguage == UiLanguage::Chinese
+                ? L"\u5C1A\u672A\u8A2D\u5B9A\u672C\u5730\u4F3A\u670D\u5668 URL\u3002"
+                : L"No local server URL configured.";
         ::MessageBoxW(hwnd, warningText.c_str(), tr(TextId::SettingsTitle),
                       MB_OK | MB_ICONWARNING);
         return TRUE;
@@ -2205,6 +2268,8 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT message, WPARAM wParam,
         testResponse = LLMApiClient::listGeminiModels(apiKey);
       } else if (provider == LLMProvider::Claude) {
         testResponse = LLMApiClient::listClaudeModels(apiKey);
+      } else if (provider == LLMProvider::Local) {
+        testResponse = LLMApiClient::listLocalModels(config->localBaseUrl, apiKey);
       }
       ::SetCursor(oldCursor);
 
@@ -2250,6 +2315,12 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT message, WPARAM wParam,
       config->geminiKey = trimWhitespace(text);
       ::GetWindowTextW(::GetDlgItem(hwnd, IDC_CLAUDE_KEY_EDIT), text, 512);
       config->claudeKey = trimWhitespace(text);
+      ::GetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_URL_EDIT), text, 512);
+      config->localBaseUrl = trimWhitespace(text);
+      ::GetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_KEY_EDIT), text, 512);
+      config->localKey = trimWhitespace(text);
+      ::GetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_TIMEOUT_EDIT), text, 512);
+      config->localTimeoutSeconds = parseStoredInt(text, 300);
       SecureZeroMemory(text, sizeof(text));
       capturePromptSettingsFromDialog(hwnd, *config);
 

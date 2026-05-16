@@ -480,6 +480,145 @@ ModelListResponse LLMApiClient::listClaudeModels(const std::wstring &apiKey) {
   return response;
 }
 
+std::wstring LLMApiClient::buildLocalApiUrl(const std::wstring &baseURL) {
+  std::wstring url = baseURL;
+  // Remove trailing slash if present
+  if (!url.empty() && url.back() == L'/') {
+    url.pop_back();
+  }
+  // Append the OpenAI-compatible chat completions path
+  url += L"/v1/chat/completions";
+  return url;
+}
+
+std::wstring LLMApiClient::buildLocalModelsUrl(const std::wstring &baseURL) {
+  std::wstring url = baseURL;
+  // Remove trailing slash if present
+  if (!url.empty() && url.back() == L'/') {
+    url.pop_back();
+  }
+  // Append the OpenAI-compatible models listing path
+  url += L"/v1/models";
+  return url;
+}
+
+ModelListResponse LLMApiClient::listLocalModels(const std::wstring &baseURL,
+                                                const std::wstring &apiKey) {
+  ModelListResponse response;
+
+  if (baseURL.empty()) {
+    response.errorMessage = L"Local server URL is not configured";
+    return response;
+  }
+
+  std::wstring url = buildLocalModelsUrl(baseURL);
+
+  std::map<std::wstring, std::wstring> headers;
+  if (!apiKey.empty()) {
+    headers[L"Authorization"] = L"Bearer " + apiKey;
+  }
+
+  // Use longer timeout for local servers (may be cold-starting)
+  DWORD savedTimeout = 120000; // 2 minutes for model listing
+  HttpResponse httpResponse = HttpClient::get(url, headers);
+  if (!httpResponse.success) {
+    response.errorMessage = L"HTTP request failed: " + httpResponse.errorMessage;
+    return response;
+  }
+
+  // Parse model IDs from the response using regex
+  std::wregex idPattern(L"\"id\"\\s*:\\s*\"([^\"]+)\"");
+  for (std::wsregex_iterator it(httpResponse.body.begin(), httpResponse.body.end(),
+                                idPattern),
+       end;
+       it != end; ++it) {
+    addUniqueModel(response.models, (*it)[1].str());
+  }
+
+  if (response.models.empty()) {
+    response.errorMessage = L"Local server returned no models";
+    return response;
+  }
+
+  response.success = true;
+  return response;
+}
+
+LLMResponse LLMApiClient::callLocalLLM(const std::wstring &baseURL,
+                                       const std::wstring &apiKey,
+                                       const std::wstring &prompt,
+                                       const std::wstring &model,
+                                       int timeoutSeconds) {
+  LLMResponse response;
+
+  if (baseURL.empty()) {
+    response.errorMessage = L"Local server URL is not configured";
+    return response;
+  }
+
+  if (model.empty()) {
+    response.errorMessage = L"Model name is required";
+    return response;
+  }
+
+  std::wstring url = buildLocalApiUrl(baseURL);
+
+  // Build request body (OpenAI-compatible format)
+  std::wstring escapedPrompt = escapeJsonString(prompt);
+  std::wstring requestBody =
+      L"{\"model\":\"" + model +
+      L"\","
+      L"\"messages\":[{\"role\":\"user\",\"content\":\"" +
+      escapedPrompt +
+      L"\"}],"
+      L"\"max_tokens\":2048}";
+
+  // Set headers
+  std::map<std::wstring, std::wstring> headers;
+  headers[L"Content-Type"] = L"application/json";
+  if (!apiKey.empty()) {
+    headers[L"Authorization"] = L"Bearer " + apiKey;
+  }
+
+  // Use configurable timeout for local LLM generation (can be slow on CPU)
+  int timeoutMs = timeoutSeconds * 1000;
+  if (timeoutMs < 10000) timeoutMs = 10000; // minimum 10 seconds
+  HttpClient::setTimeout(static_cast<DWORD>(timeoutMs));
+
+  // Make request
+  HttpResponse httpResponse = HttpClient::post(url, requestBody, headers);
+
+  // Restore default timeout for subsequent cloud provider calls
+  HttpClient::setTimeout(30000);
+
+  if (!httpResponse.success) {
+    response.errorMessage =
+        L"HTTP request failed: " + httpResponse.errorMessage;
+    if (!httpResponse.body.empty()) {
+      std::wstring errorMsg = extractJsonValue(httpResponse.body, L"message");
+      if (!errorMsg.empty())
+        response.errorMessage += L"\n" + errorMsg;
+    }
+    return response;
+  }
+
+  // Parse response - extract content from choices[0].message.content
+  size_t choicesPos = httpResponse.body.find(L"\"choices\"");
+  if (choicesPos != std::wstring::npos) {
+    std::wstring content = extractJsonValue(httpResponse.body, L"content");
+    if (!content.empty()) {
+      response.success = true;
+      response.content = content;
+    }
+  }
+
+  if (!response.success) {
+    response.errorMessage = L"Failed to parse local LLM response";
+  }
+
+  return response;
+}
+
 LLMResponse LLMApiClient::callOpenAI(const std::wstring &apiKey,
                                      const std::wstring &prompt,
                                      const std::wstring &model) {

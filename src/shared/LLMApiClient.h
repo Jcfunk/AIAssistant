@@ -72,6 +72,15 @@ public:
 
   static ModelListResponse listClaudeModels(const std::wstring &apiKey);
 
+  static ModelListResponse listLocalModels(const std::wstring &baseURL,
+                                           const std::wstring &apiKey = L"");
+
+  static LLMResponse callLocalLLM(const std::wstring &baseURL,
+                                  const std::wstring &apiKey,
+                                  const std::wstring &prompt,
+                                  const std::wstring &model,
+                                  int timeoutSeconds = 300);
+
   static CopilotDeviceCode initiateCopilotDeviceFlow();
   
   // Returns: 1=success, 0=pending (keep polling), -1=error (stop polling)
@@ -99,6 +108,8 @@ public:
 
   static std::wstring sanitizeAuthBody(const std::wstring &body);
   static std::wstring buildAuthDebugMessage(const HttpResponse &httpResponse);
+  static std::wstring buildLocalApiUrl(const std::wstring &baseURL);
+  static std::wstring buildLocalModelsUrl(const std::wstring &baseURL);
   
   static constexpr const wchar_t* COPILOT_CLIENT_ID = L"Iv1.b507a08c87ecfe98";
   static std::wstring _lastCopilotAuthDebug;
