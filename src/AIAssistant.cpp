@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <richedit.h>
+#include <commctrl.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -21,6 +22,7 @@
 #include "SecureStorage.h"
 #include "SettingsStorage.h"
 #include "AIAssistantResources.h"
+#include "AIAssistantVersion.h"
 
 namespace {
 constexpr wchar_t kPluginName[] = L"AI-Assistant";
@@ -123,6 +125,14 @@ enum class TextId {
   SettingsTestConnection,
   SettingsOk,
   SettingsCancel,
+  SettingsTabProviders,
+  SettingsTabPrompt,
+  SettingsTabAppearance,
+  SettingsTabAbout,
+  SettingsAboutVersion,
+  SettingsAboutCopyright,
+  SettingsAboutLicense,
+  SettingsAboutRepoLink,
 };
 
 struct ChatMessage {
@@ -174,6 +184,10 @@ NppData g_nppData{};
 FuncItem g_funcItems[kMenuCount]{};
 HWND g_panel = nullptr;
 bool g_panelRegistered = false;
+HWND g_hProvidersTab = nullptr;
+HWND g_hPromptTab = nullptr;
+HWND g_hAppearanceTab = nullptr;
+HWND g_hAboutTab = nullptr;
 bool g_panelVisible = false;
 std::wstring g_moduleFileName;
 std::vector<ChatMessage> g_chatHistory;
@@ -243,6 +257,10 @@ INT_PTR CALLBACK PanelDlgProc(HWND hwnd, UINT message, WPARAM wParam,
                               LPARAM lParam);
 INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT message, WPARAM wParam,
                                  LPARAM lParam);
+INT_PTR CALLBACK ProvidersTabProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+INT_PTR CALLBACK PromptTabProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+INT_PTR CALLBACK AppearanceTabProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+INT_PTR CALLBACK AboutTabProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK ScintillaSubclassProc(HWND hwnd, UINT message, WPARAM wParam,
                                        LPARAM lParam);
 LRESULT CALLBACK InputEditSubclassProc(HWND hwnd, UINT message, WPARAM wParam,
@@ -255,6 +273,17 @@ void showTypingIndicator(bool show);
 void appendToChat(const std::wstring &content);
 void appendRichText(HWND chat, const std::wstring& text, bool bold, COLORREF color, const wchar_t* faceName, int pointSize);
 void setRichEditCharFormat(HWND chat, LONG effects, LONG mask, COLORREF textColor, const wchar_t* faceName, int pointSize);
+struct ThemeColors {
+  COLORREF userHeader;
+  COLORREF aiHeader;
+  COLORREF normalText;
+  COLORREF codeFence;
+  COLORREF codeContent;
+  COLORREF heading;
+  COLORREF background;
+};
+ThemeColors getThemeColors();
+void applyThemeBackground(HWND chat);
 void cancelCurrentRequest();
 void onApiStreamChunk();
 
@@ -390,6 +419,22 @@ const wchar_t *tr(TextId id) {
       return L"\u78BA\u5B9A";
     case TextId::SettingsCancel:
       return L"\u53D6\u6D88";
+    case TextId::SettingsTabProviders:
+      return L"\u4F9B\u61C9\u5546";
+    case TextId::SettingsTabPrompt:
+      return L"\u63D0\u793A";
+    case TextId::SettingsTabAppearance:
+      return L"\u5916\u89C0";
+    case TextId::SettingsTabAbout:
+      return L"\u95DC\u65BC";
+    case TextId::SettingsAboutVersion:
+      return L"\u7248\u672C";
+    case TextId::SettingsAboutCopyright:
+      return L"\u7248\u6B0A\u6240\u6709";
+    case TextId::SettingsAboutLicense:
+      return L"\u6388\u6B0A\uFF1AGPL-3.0";
+    case TextId::SettingsAboutRepoLink:
+      return L"GitHub\u5009\u5EAB";
     }
   }
 
@@ -456,6 +501,22 @@ const wchar_t *tr(TextId id) {
     return L"OK";
   case TextId::SettingsCancel:
     return L"Cancel";
+  case TextId::SettingsTabProviders:
+    return L"Providers";
+  case TextId::SettingsTabPrompt:
+    return L"Prompt";
+  case TextId::SettingsTabAppearance:
+    return L"Appearance";
+  case TextId::SettingsTabAbout:
+    return L"About";
+  case TextId::SettingsAboutVersion:
+    return L"Version";
+  case TextId::SettingsAboutCopyright:
+    return L"Copyright";
+  case TextId::SettingsAboutLicense:
+    return L"Licensed under GPL-3.0";
+  case TextId::SettingsAboutRepoLink:
+    return L"GitHub Repository";
   }
 
   return L"";
@@ -928,15 +989,55 @@ void capturePromptSettingsFromDialog(HWND hwnd, AIAssistantConfig &config) {
       ::SendMessageW(::GetDlgItem(hwnd, IDC_OUTPUT_RISKS_CHECK), BM_GETCHECK, 0,
                      0) == BST_CHECKED;
   config.customPromptInstructions.clear();
+}
 
-  wchar_t text[512]{};
-  ::GetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_URL_EDIT), text, 512);
-  config.localBaseUrl = trimWhitespace(text);
-  ::GetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_KEY_EDIT), text, 512);
-  config.localKey = trimWhitespace(text);
-  ::GetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_TIMEOUT_EDIT), text, 512);
-  config.localTimeoutSeconds = parseStoredInt(text, 300);
-  SecureZeroMemory(text, sizeof(text));
+void capturePromptSettingsFromTab(HWND tabHwnd, AIAssistantConfig &config) {
+  int presetSelection = static_cast<int>(::SendMessageW(
+      ::GetDlgItem(tabHwnd, IDC_PROMPT_PRESET_COMBO), CB_GETCURSEL, 0, 0));
+  config.promptPreset = comboIndexToPromptPreset(presetSelection);
+  int responseLanguageSelection = static_cast<int>(::SendMessageW(
+      ::GetDlgItem(tabHwnd, IDC_RESPONSE_LANGUAGE_COMBO), CB_GETCURSEL, 0, 0));
+  config.responseLanguage =
+      comboIndexToPromptResponseLanguage(responseLanguageSelection);
+  int encodingSelection = static_cast<int>(::SendMessageW(
+      ::GetDlgItem(tabHwnd, IDC_ENCODING_COMBO), CB_GETCURSEL, 0, 0));
+  config.encodingPreference =
+      comboIndexToPromptEncodingPreference(encodingSelection);
+  int detailSelection = static_cast<int>(::SendMessageW(
+      ::GetDlgItem(tabHwnd, IDC_DETAIL_LEVEL_COMBO), CB_GETCURSEL, 0, 0));
+  config.detailLevel = comboIndexToPromptDetailLevel(detailSelection);
+  unsigned int scenarioFlags = 0;
+  if (::SendMessageW(::GetDlgItem(tabHwnd, IDC_SCENARIO_EXPLAIN_CHECK),
+                     BM_GETCHECK, 0, 0) == BST_CHECKED) {
+    scenarioFlags |= ScenarioExplainCode;
+  }
+  if (::SendMessageW(::GetDlgItem(tabHwnd, IDC_SCENARIO_FIX_CHECK),
+                     BM_GETCHECK, 0, 0) == BST_CHECKED) {
+    scenarioFlags |= ScenarioFixBugs;
+  }
+  if (::SendMessageW(::GetDlgItem(tabHwnd, IDC_SCENARIO_REFACTOR_CHECK),
+                     BM_GETCHECK, 0, 0) == BST_CHECKED) {
+    scenarioFlags |= ScenarioRefactor;
+  }
+  if (::SendMessageW(::GetDlgItem(tabHwnd, IDC_SCENARIO_TEST_CHECK),
+                     BM_GETCHECK, 0, 0) == BST_CHECKED) {
+    scenarioFlags |= ScenarioGenerateTests;
+  }
+  if (::SendMessageW(::GetDlgItem(tabHwnd, IDC_SCENARIO_DOC_CHECK),
+                     BM_GETCHECK, 0, 0) == BST_CHECKED) {
+    scenarioFlags |= ScenarioWriteDocs;
+  }
+  config.scenarioFlags = scenarioFlags;
+  config.outputCodeOnly =
+      ::SendMessageW(::GetDlgItem(tabHwnd, IDC_OUTPUT_CODE_ONLY_CHECK), BM_GETCHECK,
+                     0, 0) == BST_CHECKED;
+  config.outputPreserveStyle =
+      ::SendMessageW(::GetDlgItem(tabHwnd, IDC_OUTPUT_PRESERVE_STYLE_CHECK),
+                     BM_GETCHECK, 0, 0) == BST_CHECKED;
+  config.outputMentionRisks =
+      ::SendMessageW(::GetDlgItem(tabHwnd, IDC_OUTPUT_RISKS_CHECK), BM_GETCHECK, 0,
+                     0) == BST_CHECKED;
+  config.customPromptInstructions.clear();
 }
 
 std::wstring trimWhitespace(const std::wstring &value) {
@@ -1301,10 +1402,11 @@ void updateChatDisplay() {
 
   for (const auto &msg : g_chatHistory) {
     std::wstring header = L"[" + msg.timestamp + L"] " + msg.author + L":\r\n";
-    COLORREF headerColor = msg.isUser ? RGB(0, 100, 200) : RGB(0, 120, 0);
+    ThemeColors theme = getThemeColors();
+    COLORREF headerColor = msg.isUser ? theme.userHeader : theme.aiHeader;
     appendRichText(chat, header, true, headerColor, L"Segoe UI", g_fontSize);
     appendToChat(formatMessageContent(msg.content, msg.isUser));
-    appendRichText(chat, L"\r\n", false, RGB(0, 0, 0), L"Segoe UI", g_fontSize);
+    appendRichText(chat, L"\r\n", false, theme.normalText, L"Segoe UI", g_fontSize);
   }
 }
 
@@ -2155,12 +2257,50 @@ void showTypingIndicator(bool show) {
   }
 }
 
+ThemeColors getThemeColors() {
+  bool darkMode = g_nppData._nppHandle
+      ? (::SendMessageW(g_nppData._nppHandle, NPPM_ISDARKMODEENABLED, 0, 0) != 0)
+      : false;
+
+  if (darkMode) {
+    COLORREF bg = g_nppData._nppHandle
+        ? static_cast<COLORREF>(::SendMessageW(g_nppData._nppHandle, NPPM_GETEDITORDEFAULTBACKGROUNDCOLOR, 0, 0))
+        : RGB(30, 30, 30);
+    return {
+      RGB(100, 170, 255),
+      RGB(100, 210, 100),
+      RGB(220, 220, 220),
+      RGB(140, 140, 140),
+      RGB(200, 200, 200),
+      RGB(120, 180, 255),
+      bg
+    };
+  }
+
+  return {
+    RGB(0, 100, 200),
+    RGB(0, 120, 0),
+    RGB(0, 0, 0),
+    RGB(128, 128, 128),
+    RGB(30, 30, 30),
+    RGB(0, 80, 160),
+    RGB(255, 255, 255)
+  };
+}
+
+void applyThemeBackground(HWND chat) {
+  if (!chat) return;
+  COLORREF bg = getThemeColors().background;
+  ::SendMessageW(chat, EM_SETBKGNDCOLOR, 0, static_cast<LPARAM>(bg));
+}
+
 void setRichEditCharFormat(HWND chat, LONG effects, LONG mask, COLORREF textColor, const wchar_t* faceName, int pointSize) {
   CHARFORMAT2W cf{};
   cf.cbSize = sizeof(CHARFORMAT2W);
   cf.dwEffects = effects;
-  cf.dwMask = mask;
+  cf.dwMask = mask | CFM_COLOR;
   cf.crTextColor = textColor;
+  cf.crBackColor = getThemeColors().background;
   cf.yHeight = pointSize * 20;
   if (faceName && faceName[0]) {
     wcsncpy_s(cf.szFaceName, faceName, LF_FACESIZE - 1);
@@ -2196,6 +2336,8 @@ void appendToChat(const std::wstring &content) {
   bool inCodeBlock = false;
   int fontSize = g_fontSize;
 
+  ThemeColors theme = getThemeColors();
+
   while (std::getline(input, line)) {
     if (!line.empty() && line.back() == L'\r') {
       line.pop_back();
@@ -2203,17 +2345,17 @@ void appendToChat(const std::wstring &content) {
 
     if (line.rfind(L"```", 0) == 0) {
       inCodeBlock = !inCodeBlock;
-      appendRichText(chat, line + L"\r\n", true, RGB(128, 128, 128), L"Consolas", fontSize);
+      appendRichText(chat, line + L"\r\n", true, theme.codeFence, L"Consolas", fontSize);
       continue;
     }
 
     if (inCodeBlock) {
-      appendRichText(chat, line + L"\r\n", false, RGB(30, 30, 30), L"Consolas", fontSize);
+      appendRichText(chat, line + L"\r\n", false, theme.codeContent, L"Consolas", fontSize);
       continue;
     }
 
     if (line.empty()) {
-      appendRichText(chat, L"\r\n", false, RGB(0, 0, 0), L"Segoe UI", fontSize);
+      appendRichText(chat, L"\r\n", false, theme.normalText, L"Segoe UI", fontSize);
       continue;
     }
 
@@ -2225,17 +2367,17 @@ void appendToChat(const std::wstring &content) {
       if (hashCount < heading.size() && heading[hashCount] == L' ') {
         heading = heading.substr(hashCount + 1);
       }
-      appendRichText(chat, heading + L"\r\n", true, RGB(0, 80, 160), L"Segoe UI", fontSize + 1);
+      appendRichText(chat, heading + L"\r\n", true, theme.heading, L"Segoe UI", fontSize + 1);
       continue;
     }
 
     bool isList = (line[0] == L'-' || line[0] == L'*' || line[0] == L'•');
     if (isList) {
-      appendRichText(chat, line + L"\r\n", false, RGB(0, 0, 0), L"Segoe UI", fontSize);
+      appendRichText(chat, line + L"\r\n", false, theme.normalText, L"Segoe UI", fontSize);
       continue;
     }
 
-    appendRichText(chat, line + L"\r\n", false, RGB(0, 0, 0), L"Segoe UI", fontSize);
+    appendRichText(chat, line + L"\r\n", false, theme.normalText, L"Segoe UI", fontSize);
   }
 
   if (autoScroll) {
@@ -2434,27 +2576,141 @@ void sendPrompt(const std::wstring &prompt) {
 
 INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT message, WPARAM wParam,
                                  LPARAM lParam) {
-  auto *config = reinterpret_cast<AIAssistantConfig *>(
-      ::GetWindowLongPtrW(hwnd, DWLP_USER));
-
   switch (message) {
   case WM_INITDIALOG: {
     refreshUiLanguage();
-    auto *incoming = reinterpret_cast<AIAssistantConfig *>(lParam);
-    ::SetWindowLongPtrW(hwnd, DWLP_USER, reinterpret_cast<LONG_PTR>(incoming));
+    auto *config = reinterpret_cast<AIAssistantConfig *>(lParam);
+    ::SetWindowLongPtrW(hwnd, DWLP_USER, reinterpret_cast<LONG_PTR>(config));
 
-    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_OPENAI_KEY_EDIT),
-                     incoming->openAIKey.c_str());
-    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_GEMINI_KEY_EDIT),
-                     incoming->geminiKey.c_str());
-    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_CLAUDE_KEY_EDIT),
-                     incoming->claudeKey.c_str());
-    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_URL_EDIT),
-                     incoming->localBaseUrl.c_str());
-    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_KEY_EDIT),
-                     incoming->localKey.c_str());
+    HWND tabCtrl = ::GetDlgItem(hwnd, IDC_SETTINGS_TAB_CTRL);
+    TCITEMW tie{};
+    tie.mask = TCIF_TEXT;
+
+    tie.pszText = const_cast<wchar_t *>(tr(TextId::SettingsTabProviders));
+    ::SendMessageW(tabCtrl, TCM_INSERTITEM, 0, reinterpret_cast<LPARAM>(&tie));
+    tie.pszText = const_cast<wchar_t *>(tr(TextId::SettingsTabPrompt));
+    ::SendMessageW(tabCtrl, TCM_INSERTITEM, 1, reinterpret_cast<LPARAM>(&tie));
+    tie.pszText = const_cast<wchar_t *>(tr(TextId::SettingsTabAppearance));
+    ::SendMessageW(tabCtrl, TCM_INSERTITEM, 2, reinterpret_cast<LPARAM>(&tie));
+    tie.pszText = const_cast<wchar_t *>(tr(TextId::SettingsTabAbout));
+    ::SendMessageW(tabCtrl, TCM_INSERTITEM, 3, reinterpret_cast<LPARAM>(&tie));
+
+    RECT rc;
+    ::GetWindowRect(tabCtrl, &rc);
+    ::SendMessageW(tabCtrl, TCM_ADJUSTRECT, FALSE, reinterpret_cast<LPARAM>(&rc));
+    int displayLeft = rc.left;
+    int displayTop = rc.top;
+    int displayWidth = rc.right - rc.left;
+    int displayHeight = rc.bottom - rc.top;
+
+    g_hProvidersTab = ::CreateDialogParamW(g_hInst, MAKEINTRESOURCEW(IDD_TAB_PROVIDERS),
+                                            hwnd, ProvidersTabProc, reinterpret_cast<LPARAM>(config));
+    g_hPromptTab = ::CreateDialogParamW(g_hInst, MAKEINTRESOURCEW(IDD_TAB_PROMPT),
+                                         hwnd, PromptTabProc, reinterpret_cast<LPARAM>(config));
+    g_hAppearanceTab = ::CreateDialogParamW(g_hInst, MAKEINTRESOURCEW(IDD_TAB_APPEARANCE),
+                                             hwnd, AppearanceTabProc, reinterpret_cast<LPARAM>(config));
+    g_hAboutTab = ::CreateDialogParamW(g_hInst, MAKEINTRESOURCEW(IDD_TAB_ABOUT),
+                                        hwnd, AboutTabProc, reinterpret_cast<LPARAM>(config));
+
+    ::SetWindowPos(g_hProvidersTab, nullptr, displayLeft, displayTop, displayWidth, displayHeight, SWP_NOZORDER);
+    ::SetWindowPos(g_hPromptTab, nullptr, displayLeft, displayTop, displayWidth, displayHeight, SWP_NOZORDER);
+    ::SetWindowPos(g_hAppearanceTab, nullptr, displayLeft, displayTop, displayWidth, displayHeight, SWP_NOZORDER);
+    ::SetWindowPos(g_hAboutTab, nullptr, displayLeft, displayTop, displayWidth, displayHeight, SWP_NOZORDER);
+
+    ::ShowWindow(g_hProvidersTab, SW_SHOW);
+    ::ShowWindow(g_hPromptTab, SW_HIDE);
+    ::ShowWindow(g_hAppearanceTab, SW_HIDE);
+    ::ShowWindow(g_hAboutTab, SW_HIDE);
+
+    return TRUE;
+  }
+
+  case WM_NOTIFY: {
+    auto *hdr = reinterpret_cast<LPNMHDR>(lParam);
+    if (hdr->code == TCN_SELCHANGE) {
+      int sel = static_cast<int>(::SendMessageW(hdr->hwndFrom, TCM_GETCURSEL, 0, 0));
+      ::ShowWindow(g_hProvidersTab, sel == 0 ? SW_SHOW : SW_HIDE);
+      ::ShowWindow(g_hPromptTab, sel == 1 ? SW_SHOW : SW_HIDE);
+      ::ShowWindow(g_hAppearanceTab, sel == 2 ? SW_SHOW : SW_HIDE);
+      ::ShowWindow(g_hAboutTab, sel == 3 ? SW_SHOW : SW_HIDE);
+      return TRUE;
+    }
+    break;
+  }
+
+  case WM_COMMAND:
+    switch (LOWORD(wParam)) {
+    case IDOK: {
+      auto *cfg = reinterpret_cast<AIAssistantConfig *>(
+          ::GetWindowLongPtrW(hwnd, DWLP_USER));
+      if (!cfg) {
+        ::EndDialog(hwnd, IDOK);
+        return TRUE;
+      }
+
+      wchar_t text[512]{};
+      ::GetWindowTextW(::GetDlgItem(g_hProvidersTab, IDC_OPENAI_KEY_EDIT), text, 512);
+      cfg->openAIKey = trimWhitespace(text);
+      ::GetWindowTextW(::GetDlgItem(g_hProvidersTab, IDC_GEMINI_KEY_EDIT), text, 512);
+      cfg->geminiKey = trimWhitespace(text);
+      ::GetWindowTextW(::GetDlgItem(g_hProvidersTab, IDC_CLAUDE_KEY_EDIT), text, 512);
+      cfg->claudeKey = trimWhitespace(text);
+      ::GetWindowTextW(::GetDlgItem(g_hProvidersTab, IDC_LOCAL_URL_EDIT), text, 512);
+      cfg->localBaseUrl = trimWhitespace(text);
+      ::GetWindowTextW(::GetDlgItem(g_hProvidersTab, IDC_LOCAL_KEY_EDIT), text, 512);
+      cfg->localKey = trimWhitespace(text);
+      ::GetWindowTextW(::GetDlgItem(g_hProvidersTab, IDC_LOCAL_TIMEOUT_EDIT), text, 512);
+      cfg->localTimeoutSeconds = parseStoredInt(text, 300);
+      SecureZeroMemory(text, sizeof(text));
+
+      capturePromptSettingsFromTab(g_hPromptTab, *cfg);
+
+      cfg->requireCtrlEnterToSend =
+          ::SendMessageW(::GetDlgItem(g_hAppearanceTab, IDC_SEND_SHORTCUT_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
+      int langSel = static_cast<int>(::SendMessageW(
+          ::GetDlgItem(g_hAppearanceTab, IDC_UI_LANGUAGE_COMBO), CB_GETCURSEL, 0, 0));
+      cfg->uiLanguagePreference = comboIndexToUiLanguagePreference(langSel);
+
+      int provSel = static_cast<int>(::SendMessageW(
+          ::GetDlgItem(g_hProvidersTab, IDC_DEFAULT_PROVIDER_COMBO), CB_GETCURSEL, 0, 0));
+      if (provSel >= 0 && provSel < static_cast<int>(kEnabledProviders.size())) {
+        cfg->defaultProvider = comboIndexToProvider(provSel);
+      }
+
+      ::EndDialog(hwnd, IDOK);
+      return TRUE;
+    }
+
+    case IDCANCEL:
+      ::EndDialog(hwnd, IDCANCEL);
+      return TRUE;
+    }
+    break;
+
+  case WM_DESTROY:
+    if (g_hProvidersTab) { ::DestroyWindow(g_hProvidersTab); g_hProvidersTab = nullptr; }
+    if (g_hPromptTab) { ::DestroyWindow(g_hPromptTab); g_hPromptTab = nullptr; }
+    if (g_hAppearanceTab) { ::DestroyWindow(g_hAppearanceTab); g_hAppearanceTab = nullptr; }
+    if (g_hAboutTab) { ::DestroyWindow(g_hAboutTab); g_hAboutTab = nullptr; }
+    break;
+  }
+
+  return FALSE;
+}
+
+INT_PTR CALLBACK ProvidersTabProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+  switch (message) {
+  case WM_INITDIALOG: {
+    auto *config = reinterpret_cast<AIAssistantConfig *>(lParam);
+    ::SetWindowLongPtrW(hwnd, DWLP_USER, reinterpret_cast<LONG_PTR>(config));
+
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_OPENAI_KEY_EDIT), config->openAIKey.c_str());
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_GEMINI_KEY_EDIT), config->geminiKey.c_str());
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_CLAUDE_KEY_EDIT), config->claudeKey.c_str());
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_URL_EDIT), config->localBaseUrl.c_str());
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_KEY_EDIT), config->localKey.c_str());
     ::SetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_TIMEOUT_EDIT),
-                     std::to_wstring(incoming->localTimeoutSeconds).c_str());
+                     std::to_wstring(config->localTimeoutSeconds).c_str());
 
     HWND providerCombo = ::GetDlgItem(hwnd, IDC_DEFAULT_PROVIDER_COMBO);
     ::SendMessageW(providerCombo, CB_RESETCONTENT, 0, 0);
@@ -2465,41 +2721,199 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT message, WPARAM wParam,
     }
     ::SendMessageW(providerCombo, CB_SETCURSEL,
                    static_cast<WPARAM>(
-                       providerToComboIndex(sanitizeProvider(incoming->defaultProvider))),
+                       providerToComboIndex(sanitizeProvider(config->defaultProvider))),
                    0);
-    populateLanguageCombo(::GetDlgItem(hwnd, IDC_UI_LANGUAGE_COMBO),
-                          incoming->uiLanguagePreference);
-    syncPromptControlsFromConfig(hwnd, *incoming);
 
     const wchar_t maskChar = L'*';
-    ::SendMessageW(::GetDlgItem(hwnd, IDC_OPENAI_KEY_EDIT), EM_SETPASSWORDCHAR,
-                   maskChar, 0);
-    ::SendMessageW(::GetDlgItem(hwnd, IDC_GEMINI_KEY_EDIT), EM_SETPASSWORDCHAR,
-                   maskChar, 0);
-    ::SendMessageW(::GetDlgItem(hwnd, IDC_CLAUDE_KEY_EDIT), EM_SETPASSWORDCHAR,
-                   maskChar, 0);
-    ::SendMessageW(::GetDlgItem(hwnd, IDC_LOCAL_KEY_EDIT), EM_SETPASSWORDCHAR,
-                   maskChar, 0);
-    ::SendMessageW(::GetDlgItem(hwnd, IDC_SEND_SHORTCUT_CHECK), BM_SETCHECK,
-                   incoming->requireCtrlEnterToSend ? BST_CHECKED : BST_UNCHECKED,
-                   0);
-    applyLocalizedSettingsText(hwnd);
-    updatePromptPreviewInSettings(hwnd, *incoming);
+    ::SendMessageW(::GetDlgItem(hwnd, IDC_OPENAI_KEY_EDIT), EM_SETPASSWORDCHAR, maskChar, 0);
+    ::SendMessageW(::GetDlgItem(hwnd, IDC_GEMINI_KEY_EDIT), EM_SETPASSWORDCHAR, maskChar, 0);
+    ::SendMessageW(::GetDlgItem(hwnd, IDC_CLAUDE_KEY_EDIT), EM_SETPASSWORDCHAR, maskChar, 0);
+    ::SendMessageW(::GetDlgItem(hwnd, IDC_LOCAL_KEY_EDIT), EM_SETPASSWORDCHAR, maskChar, 0);
+
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_API_KEYS_GROUP), tr(TextId::SettingsApiKeysGroup));
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_OPENAI_KEY_LABEL), tr(TextId::SettingsOpenAIKeyLabel));
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_GEMINI_KEY_LABEL), tr(TextId::SettingsGeminiKeyLabel));
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_CLAUDE_KEY_LABEL), tr(TextId::SettingsClaudeKeyLabel));
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_API_KEYS_OPENAI_HINT), tr(TextId::SettingsApiKeysOpenAIHint));
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_API_KEYS_GEMINI_HINT), tr(TextId::SettingsApiKeysGeminiHint));
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_API_KEYS_CLAUDE_HINT), tr(TextId::SettingsApiKeysClaudeHint));
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_DEFAULT_PROVIDER_GROUP), tr(TextId::SettingsDefaultProviderGroup));
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_DEFAULT_PROVIDER_LABEL), tr(TextId::SettingsDefaultProviderLabel));
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_URL_LABEL),
+                     g_uiLanguage == UiLanguage::Chinese ? L"\u672C\u5730\u4F3A\u670D\u5668 URL\uFF1A" : L"Local server URL:");
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_KEY_LABEL),
+                     g_uiLanguage == UiLanguage::Chinese ? L"\u672C\u5730 API Key\uFF1A" : L"Local API key:");
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_TIMEOUT_LABEL),
+                     g_uiLanguage == UiLanguage::Chinese ? L"\u8D85\u6642\uFF08\u79D2\uFF09\uFF1A" : L"Timeout (s):");
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_TEST_CONNECTION_BTN), tr(TextId::SettingsTestConnection));
     return TRUE;
   }
 
-  case WM_AI_RESPONSE_READY:
-    onApiResponseReady();
-    return TRUE;
+  case WM_COMMAND:
+    if (LOWORD(wParam) == IDC_TEST_CONNECTION_BTN) {
+    auto *config = reinterpret_cast<AIAssistantConfig *>(
+        ::GetWindowLongPtrW(hwnd, DWLP_USER));
+    if (!config) return TRUE;
 
-  case WM_AI_STREAM_CHUNK:
-    onApiStreamChunk();
+    wchar_t text[512]{};
+    ::GetWindowTextW(::GetDlgItem(hwnd, IDC_OPENAI_KEY_EDIT), text, 512);
+    config->openAIKey = trimWhitespace(text);
+    ::GetWindowTextW(::GetDlgItem(hwnd, IDC_GEMINI_KEY_EDIT), text, 512);
+    config->geminiKey = trimWhitespace(text);
+    ::GetWindowTextW(::GetDlgItem(hwnd, IDC_CLAUDE_KEY_EDIT), text, 512);
+    config->claudeKey = trimWhitespace(text);
+    ::GetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_URL_EDIT), text, 512);
+    config->localBaseUrl = trimWhitespace(text);
+    ::GetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_KEY_EDIT), text, 512);
+    config->localKey = trimWhitespace(text);
+    ::GetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_TIMEOUT_EDIT), text, 512);
+    config->localTimeoutSeconds = parseStoredInt(text, 300);
+    SecureZeroMemory(text, sizeof(text));
+
+    int providerSelection = static_cast<int>(::SendMessageW(
+        ::GetDlgItem(hwnd, IDC_DEFAULT_PROVIDER_COMBO), CB_GETCURSEL, 0, 0));
+    LLMProvider provider = comboIndexToProvider(providerSelection);
+
+    std::wstring apiKey;
+    std::wstring providerName;
+    switch (provider) {
+    case LLMProvider::OpenAI:
+      apiKey = config->openAIKey;
+      providerName = L"OpenAI";
+      break;
+    case LLMProvider::Gemini:
+      apiKey = config->geminiKey;
+      providerName = L"Gemini";
+      break;
+    case LLMProvider::Claude:
+      apiKey = config->claudeKey;
+      providerName = L"Claude";
+      break;
+    case LLMProvider::Local:
+      apiKey = config->localKey;
+      providerName = L"Local";
+      break;
+    default:
+      return TRUE;
+    }
+
+    if (provider != LLMProvider::Local && apiKey.empty()) {
+      const std::wstring warningText =
+          g_uiLanguage == UiLanguage::Chinese
+              ? L"\u5C1A\u672A\u8A2D\u5B9A " + providerName + L" API Key\u3002"
+              : L"No API key configured for " + providerName + L".";
+      ::MessageBoxW(hwnd, warningText.c_str(), tr(TextId::SettingsTitle),
+                    MB_OK | MB_ICONWARNING);
+      return TRUE;
+    }
+
+    if (provider == LLMProvider::Local && config->localBaseUrl.empty()) {
+      const std::wstring warningText =
+          g_uiLanguage == UiLanguage::Chinese
+              ? L"\u5C1A\u672A\u8A2D\u5B9A\u672C\u5730\u4F3A\u670D\u5668 URL\u3002"
+              : L"No local server URL configured.";
+      ::MessageBoxW(hwnd, warningText.c_str(), tr(TextId::SettingsTitle),
+                    MB_OK | MB_ICONWARNING);
+      return TRUE;
+    }
+
+    HCURSOR oldCursor = ::SetCursor(::LoadCursorW(nullptr, IDC_WAIT));
+    ModelListResponse testResponse;
+    if (provider == LLMProvider::OpenAI) {
+      testResponse = LLMApiClient::listOpenAIModels(apiKey);
+    } else if (provider == LLMProvider::Gemini) {
+      testResponse = LLMApiClient::listGeminiModels(apiKey);
+    } else if (provider == LLMProvider::Claude) {
+      testResponse = LLMApiClient::listClaudeModels(apiKey);
+    } else if (provider == LLMProvider::Local) {
+      testResponse = LLMApiClient::listLocalModels(config->localBaseUrl, apiKey);
+    }
+    ::SetCursor(oldCursor);
+
+    std::wstring messageText;
+    if (testResponse.success) {
+      messageText = g_uiLanguage == UiLanguage::Chinese
+                        ? L"\u8207 " + providerName + L" \u9023\u7DDA\u6210\u529F\u3002"
+                        : L"Connection to " + providerName + L" succeeded.";
+      if (!testResponse.models.empty()) {
+        messageText += L"\n\n";
+        messageText +=
+            g_uiLanguage == UiLanguage::Chinese
+                ? L"\u5075\u6E2C\u5230\u6A21\u578B\u6578\uFF1A" +
+                      std::to_wstring(testResponse.models.size())
+                : L"Detected models: " + std::to_wstring(testResponse.models.size());
+        messageText +=
+            g_uiLanguage == UiLanguage::Chinese
+                ? L"\n\u9996\u500B\u6A21\u578B\uFF1A" + testResponse.models.front()
+                : L"\nFirst model: " + testResponse.models.front();
+      }
+    } else {
+      messageText = g_uiLanguage == UiLanguage::Chinese
+                        ? L"\u8207 " + providerName + L" \u9023\u7DDA\u5931\u6557\u3002\n\n" + testResponse.errorMessage
+                        : L"Connection to " + providerName + L" failed.\n\n" + testResponse.errorMessage;
+    }
+    ::MessageBoxW(hwnd, messageText.c_str(), tr(TextId::SettingsTitle),
+                  MB_OK | (testResponse.success ? MB_ICONINFORMATION : MB_ICONERROR));
+      return TRUE;
+    }
+    break;
+  }
+  return FALSE;
+}
+
+INT_PTR CALLBACK PromptTabProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+  switch (message) {
+  case WM_INITDIALOG: {
+    auto *config = reinterpret_cast<AIAssistantConfig *>(lParam);
+    ::SetWindowLongPtrW(hwnd, DWLP_USER, reinterpret_cast<LONG_PTR>(config));
+
+    syncPromptControlsFromConfig(hwnd, *config);
+    updatePromptPreviewInSettings(hwnd, *config);
+
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_PROMPT_PROFILE_GROUP),
+                     g_uiLanguage == UiLanguage::Chinese
+                         ? L"\u55AE\u8F2A\u63D0\u793A\u8A5E\u8A2D\u5B9A"
+                         : L"Single-turn Prompt Profile");
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_PROMPT_PRESET_LABEL),
+                     g_uiLanguage == UiLanguage::Chinese ? L"\u9810\u8A2D\u65B9\u6848\uFF1A" : L"Preset:");
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_RESPONSE_LANGUAGE_LABEL),
+                     g_uiLanguage == UiLanguage::Chinese ? L"\u56DE\u8986\u8A9E\u8A00\uFF1A" : L"Response language:");
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_ENCODING_LABEL),
+                     g_uiLanguage == UiLanguage::Chinese ? L"\u7DE8\u78BC\u5EFA\u8B70\uFF1A" : L"Encoding suggestion:");
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_DETAIL_LEVEL_LABEL),
+                     g_uiLanguage == UiLanguage::Chinese ? L"\u56DE\u8986\u8A73\u7D30\u5EA6\uFF1A" : L"Response detail:");
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_SCENARIO_GROUP),
+                     g_uiLanguage == UiLanguage::Chinese ? L"\u60C5\u5883\u6A21\u7D44" : L"Scenario Modules");
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_SCENARIO_EXPLAIN_CHECK),
+                     g_uiLanguage == UiLanguage::Chinese ? L"\u89E3\u91CB\u7A0B\u5F0F\u78BC" : L"Explain code");
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_SCENARIO_FIX_CHECK),
+                     g_uiLanguage == UiLanguage::Chinese ? L"\u4FEE\u6B63 bug" : L"Fix bugs");
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_SCENARIO_REFACTOR_CHECK),
+                     g_uiLanguage == UiLanguage::Chinese ? L"\u91CD\u69CB\u512A\u5316" : L"Refactor");
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_SCENARIO_TEST_CHECK),
+                     g_uiLanguage == UiLanguage::Chinese ? L"\u7522\u751F\u6E2C\u8A66" : L"Generate tests");
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_SCENARIO_DOC_CHECK),
+                     g_uiLanguage == UiLanguage::Chinese ? L"\u64B0\u5BEB\u6587\u4EF6" : L"Write docs");
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_OUTPUT_GROUP),
+                     g_uiLanguage == UiLanguage::Chinese ? L"\u8F38\u51FA\u898F\u5247" : L"Output Rules");
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_OUTPUT_CODE_ONLY_CHECK),
+                     g_uiLanguage == UiLanguage::Chinese ? L"\u9069\u5408\u6642\u50C5\u8F38\u51FA\u7A0B\u5F0F\u78BC" : L"Code only when suitable");
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_OUTPUT_PRESERVE_STYLE_CHECK),
+                     g_uiLanguage == UiLanguage::Chinese ? L"\u4FDD\u7559\u5C08\u6848\u98A8\u683C" : L"Preserve project style");
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_OUTPUT_RISKS_CHECK),
+                     g_uiLanguage == UiLanguage::Chinese ? L"\u63D0\u9192\u98A8\u96AA\u8207\u5047\u8A2D" : L"Mention risks and assumptions");
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_CUSTOM_PROMPT_GROUP),
+                     g_uiLanguage == UiLanguage::Chinese ? L"\u63D0\u793A\u8A5E\u9810\u89BD" : L"Prompt Preview");
     return TRUE;
+  }
 
   case WM_COMMAND:
     switch (LOWORD(wParam)) {
     case IDC_PROMPT_PRESET_COMBO:
-      if (HIWORD(wParam) == CBN_SELCHANGE && config) {
+      if (HIWORD(wParam) == CBN_SELCHANGE) {
+        auto *config = reinterpret_cast<AIAssistantConfig *>(
+            ::GetWindowLongPtrW(hwnd, DWLP_USER));
+        if (!config) return TRUE;
         int presetSelection = static_cast<int>(::SendMessageW(
             ::GetDlgItem(hwnd, IDC_PROMPT_PRESET_COMBO), CB_GETCURSEL, 0, 0));
         applyPromptPresetToConfig(*config, comboIndexToPromptPreset(presetSelection));
@@ -2512,9 +2926,11 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT message, WPARAM wParam,
     case IDC_RESPONSE_LANGUAGE_COMBO:
     case IDC_ENCODING_COMBO:
     case IDC_DETAIL_LEVEL_COMBO:
-    case IDC_UI_LANGUAGE_COMBO:
-      if (HIWORD(wParam) == CBN_SELCHANGE && config) {
-        capturePromptSettingsFromDialog(hwnd, *config);
+      if (HIWORD(wParam) == CBN_SELCHANGE) {
+        auto *config = reinterpret_cast<AIAssistantConfig *>(
+            ::GetWindowLongPtrW(hwnd, DWLP_USER));
+        if (!config) return TRUE;
+        capturePromptSettingsFromTab(hwnd, *config);
         updatePromptPreviewInSettings(hwnd, *config);
         return TRUE;
       }
@@ -2528,150 +2944,61 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT message, WPARAM wParam,
     case IDC_OUTPUT_CODE_ONLY_CHECK:
     case IDC_OUTPUT_PRESERVE_STYLE_CHECK:
     case IDC_OUTPUT_RISKS_CHECK:
-      if (HIWORD(wParam) == BN_CLICKED && config) {
-        capturePromptSettingsFromDialog(hwnd, *config);
+      if (HIWORD(wParam) == BN_CLICKED) {
+        auto *config = reinterpret_cast<AIAssistantConfig *>(
+            ::GetWindowLongPtrW(hwnd, DWLP_USER));
+        if (!config) return TRUE;
+        capturePromptSettingsFromTab(hwnd, *config);
         updatePromptPreviewInSettings(hwnd, *config);
         return TRUE;
       }
       break;
-
-    case IDC_TEST_CONNECTION_BTN: {
-      if (!config) {
-        return TRUE;
-      }
-
-      wchar_t text[512]{};
-      ::GetWindowTextW(::GetDlgItem(hwnd, IDC_OPENAI_KEY_EDIT), text, 512);
-      config->openAIKey = trimWhitespace(text);
-      ::GetWindowTextW(::GetDlgItem(hwnd, IDC_GEMINI_KEY_EDIT), text, 512);
-      config->geminiKey = trimWhitespace(text);
-      ::GetWindowTextW(::GetDlgItem(hwnd, IDC_CLAUDE_KEY_EDIT), text, 512);
-      config->claudeKey = trimWhitespace(text);
-      SecureZeroMemory(text, sizeof(text));
-      capturePromptSettingsFromDialog(hwnd, *config);
-
-      int providerSelection = static_cast<int>(::SendMessageW(
-          ::GetDlgItem(hwnd, IDC_DEFAULT_PROVIDER_COMBO), CB_GETCURSEL, 0, 0));
-      LLMProvider provider = comboIndexToProvider(providerSelection);
-
-      std::wstring apiKey;
-      std::wstring providerName;
-      switch (provider) {
-      case LLMProvider::OpenAI:
-        apiKey = config->openAIKey;
-        providerName = L"OpenAI";
-        break;
-      case LLMProvider::Gemini:
-        apiKey = config->geminiKey;
-        providerName = L"Gemini";
-        break;
-      case LLMProvider::Claude:
-        apiKey = config->claudeKey;
-        providerName = L"Claude";
-        break;
-      case LLMProvider::Local:
-        apiKey = config->localKey;
-        providerName = L"Local";
-        break;
-      default:
-        return TRUE;
-      }
-
-      if (provider != LLMProvider::Local && apiKey.empty()) {
-        const std::wstring warningText =
-            g_uiLanguage == UiLanguage::Chinese
-                ? L"\u5C1A\u672A\u8A2D\u5B9A " + providerName + L" API Key\u3002"
-                : L"No API key configured for " + providerName + L".";
-        ::MessageBoxW(hwnd, warningText.c_str(), tr(TextId::SettingsTitle),
-                      MB_OK | MB_ICONWARNING);
-        return TRUE;
-      }
-
-      if (provider == LLMProvider::Local && config->localBaseUrl.empty()) {
-        const std::wstring warningText =
-            g_uiLanguage == UiLanguage::Chinese
-                ? L"\u5C1A\u672A\u8A2D\u5B9A\u672C\u5730\u4F3A\u670D\u5668 URL\u3002"
-                : L"No local server URL configured.";
-        ::MessageBoxW(hwnd, warningText.c_str(), tr(TextId::SettingsTitle),
-                      MB_OK | MB_ICONWARNING);
-        return TRUE;
-      }
-
-      HCURSOR oldCursor = ::SetCursor(::LoadCursorW(nullptr, IDC_WAIT));
-      ModelListResponse testResponse;
-      if (provider == LLMProvider::OpenAI) {
-        testResponse = LLMApiClient::listOpenAIModels(apiKey);
-      } else if (provider == LLMProvider::Gemini) {
-        testResponse = LLMApiClient::listGeminiModels(apiKey);
-      } else if (provider == LLMProvider::Claude) {
-        testResponse = LLMApiClient::listClaudeModels(apiKey);
-      } else if (provider == LLMProvider::Local) {
-        testResponse = LLMApiClient::listLocalModels(config->localBaseUrl, apiKey);
-      }
-      ::SetCursor(oldCursor);
-
-      std::wstring messageText;
-      if (testResponse.success) {
-        messageText = g_uiLanguage == UiLanguage::Chinese
-                          ? L"\u8207 " + providerName + L" \u9023\u7DDA\u6210\u529F\u3002"
-                          : L"Connection to " + providerName + L" succeeded.";
-        if (!testResponse.models.empty()) {
-          messageText += L"\n\n";
-          messageText +=
-              g_uiLanguage == UiLanguage::Chinese
-                  ? L"\u5075\u6E2C\u5230\u6A21\u578B\u6578\uFF1A" +
-                        std::to_wstring(testResponse.models.size())
-                  : L"Detected models: " +
-                        std::to_wstring(testResponse.models.size());
-          messageText +=
-              g_uiLanguage == UiLanguage::Chinese
-                  ? L"\n\u9996\u500B\u6A21\u578B\uFF1A" + testResponse.models.front()
-                  : L"\nFirst model: " + testResponse.models.front();
-        }
-      } else {
-        messageText = g_uiLanguage == UiLanguage::Chinese
-                          ? L"\u8207 " + providerName + L" \u9023\u7DDA\u5931\u6557\u3002\n\n" + testResponse.errorMessage
-                          : L"Connection to " + providerName +
-                                L" failed.\n\n" + testResponse.errorMessage;
-      }
-      ::MessageBoxW(hwnd, messageText.c_str(), tr(TextId::SettingsTitle),
-                    MB_OK | (testResponse.success ? MB_ICONINFORMATION : MB_ICONERROR));
-      return TRUE;
     }
+    break;
+  }
+  return FALSE;
+}
 
-    case IDOK: {
-      if (!config) {
-        ::EndDialog(hwnd, IDOK);
-        return TRUE;
-      }
+INT_PTR CALLBACK AppearanceTabProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+  switch (message) {
+  case WM_INITDIALOG: {
+    auto *config = reinterpret_cast<AIAssistantConfig *>(lParam);
+    ::SetWindowLongPtrW(hwnd, DWLP_USER, reinterpret_cast<LONG_PTR>(config));
 
-      wchar_t text[512]{};
-      ::GetWindowTextW(::GetDlgItem(hwnd, IDC_OPENAI_KEY_EDIT), text, 512);
-      config->openAIKey = trimWhitespace(text);
-      ::GetWindowTextW(::GetDlgItem(hwnd, IDC_GEMINI_KEY_EDIT), text, 512);
-      config->geminiKey = trimWhitespace(text);
-      ::GetWindowTextW(::GetDlgItem(hwnd, IDC_CLAUDE_KEY_EDIT), text, 512);
-      config->claudeKey = trimWhitespace(text);
-      ::GetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_URL_EDIT), text, 512);
-      config->localBaseUrl = trimWhitespace(text);
-      ::GetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_KEY_EDIT), text, 512);
-      config->localKey = trimWhitespace(text);
-      ::GetWindowTextW(::GetDlgItem(hwnd, IDC_LOCAL_TIMEOUT_EDIT), text, 512);
-      config->localTimeoutSeconds = parseStoredInt(text, 300);
-      SecureZeroMemory(text, sizeof(text));
-      capturePromptSettingsFromDialog(hwnd, *config);
+    populateLanguageCombo(::GetDlgItem(hwnd, IDC_UI_LANGUAGE_COMBO),
+                          config->uiLanguagePreference);
+    ::SendMessageW(::GetDlgItem(hwnd, IDC_SEND_SHORTCUT_CHECK), BM_SETCHECK,
+                   config->requireCtrlEnterToSend ? BST_CHECKED : BST_UNCHECKED, 0);
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_UI_LANGUAGE_LABEL), tr(TextId::SettingsLanguageLabel));
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_SEND_SHORTCUT_CHECK), tr(TextId::SettingsCtrlEnter));
+    return TRUE;
+  }
+  }
+  return FALSE;
+}
 
-      ::EndDialog(hwnd, IDOK);
-      return TRUE;
-    }
+INT_PTR CALLBACK AboutTabProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+  switch (message) {
+  case WM_INITDIALOG: {
+    std::wstring versionText = std::wstring(tr(TextId::SettingsAboutVersion)) + L" " +
+                               std::to_wstring(NPPAI_VERSION_MAJOR) + L"." +
+                               std::to_wstring(NPPAI_VERSION_MINOR) + L"." +
+                               std::to_wstring(NPPAI_VERSION_PATCH);
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_ABOUT_VERSION), versionText.c_str());
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_ABOUT_COPYRIGHT), tr(TextId::SettingsAboutCopyright));
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_ABOUT_LICENSE), L"Licensed under GPL-3.0");
+    ::SetWindowTextW(::GetDlgItem(hwnd, IDC_ABOUT_REPO_LINK), L"https://github.com/anomalyco/AI-Assistant");
+    return TRUE;
+  }
 
-    case IDCANCEL:
-      ::EndDialog(hwnd, IDCANCEL);
+  case WM_COMMAND:
+    if (LOWORD(wParam) == IDC_ABOUT_REPO_LINK && HIWORD(wParam) == STN_CLICKED) {
+      ::ShellExecuteW(nullptr, L"open", L"https://github.com/anomalyco/AI-Assistant",
+                      nullptr, nullptr, SW_SHOWNORMAL);
       return TRUE;
     }
     break;
   }
-
   return FALSE;
 }
 
@@ -2815,6 +3142,7 @@ INT_PTR CALLBACK PanelDlgProc(HWND hwnd, UINT message, WPARAM wParam,
     initPanelControls();
     installInputEditSubclass();
     resizePanelControls();
+    applyThemeBackground(::GetDlgItem(hwnd, IDC_AI_CHAT_HISTORY));
     addMessage(false, tr(TextId::WelcomeMessage));
     updateChatDisplay();
     return TRUE;
@@ -3116,11 +3444,10 @@ LRESULT CALLBACK ScintillaSubclassProc(HWND hwnd, UINT message, WPARAM wParam,
     return ::DefWindowProcW(hwnd, message, wParam, lParam);
   }
 
-  if (message == WM_CONTEXTMENU && !getSelectionText(hwnd).empty()) {
-    showAiContextMenu(hwnd, lParam);
-    return 0;
-  }
-
+  // Forward all messages to original window proc
+  // Note: WM_CONTEXTMENU is NOT intercepted here, so Notepad++'s native
+  // context menu (cut/copy/paste/etc.) remains fully accessible.
+  // AI actions are available via the Plugins menu instead.
   return ::CallWindowProcW(original, hwnd, message, wParam, lParam);
 }
 
